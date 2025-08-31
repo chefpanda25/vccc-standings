@@ -2,9 +2,10 @@ import React, { useMemo, useState, useEffect } from 'react'
 import Papa from 'papaparse'
 
 /** =========================================================================
- *  Violet Crown Pickleball — Standings App (with Guided Matchday for 4/5/6/7/8)
+ *  Violet Crown Pickleball — Standings App (Guided Matchday + Reseed Bracket)
  *  - Events ledger (undo + history) and recomputation of standings
- *  - Guided Matchday: auto-letter seeding, auto-schedule, one-score-at-a-time
+ *  - Guided Matchday for 4/5/6/7/8 with **post-pool reseeding**
+ *  - Shows every logged game (stage-labeled) while adding AND in history
  *  - Manual placements still available
  *  - CSV import (4p/8p heuristic) and JSON backup of events ledger
  *  - Tiebreakers: Points → Wins → Points For → Avg Diff
@@ -118,150 +119,184 @@ function assignLetters(roster, season, method='standings'){
   return map // e.g., {A:"Nathaniel", B:"Alex", ...}
 }
 
-function letterPairToNames(pair, L){ return pair.map(ch => L[ch]) }
-
-// Build the exact event-day schedule by size, using your provided charts
-function buildSchedule(size, lettersMap){
-  const L = lettersMap
-  const P = (l1,l2) => ({ stage:'pool', to:11, winBy:1, pair1:l1, pair2:l2 })
-  const B = (l1,l2,label) => ({ stage:'bracket', to:15, winBy:2, pair1:l1, pair2:l2, label })
-
-  // helper to turn like 'AB' into ['A','B']
+// Build ONLY the pool schedule by size (letters, not names yet)
+function buildPoolSchedule(size){
   const t = s => [s[0], s[1]]
-
-  const schedule = []
+  const P = (l1,l2,label) => ({ phase:'pool', to:11, winBy:1, pair1:l1, pair2:l2, label })
+  const pool = []
 
   if (size===4){
-    schedule.push(
-      P(t('AB'), t('CD')),
-      P(t('AD'), t('BC')),
-      P(t('AC'), t('BD')),
-      B(t('AB'), t('CD'), 'Final')
-    )
+    pool.push(P(t('AB'), t('CD'), 'Pool 1'))
+    pool.push(P(t('AD'), t('BC'), 'Pool 2'))
+    pool.push(P(t('AC'), t('BD'), 'Pool 3'))
   }
-
   if (size===5){
-    schedule.push(
-      P(t('AC'), t('DE')),
-      P(t('AE'), t('BD')),
-      P(t('AD'), t('BC')),
-      P(t('AE'), t('BC')),
-      P(t('BE'), t('CD')),
-      B(t('AB'), t('CD'), 'Final') // 3rd will be E by structure
-    )
+    pool.push(P(t('AC'), t('DE'), 'Pool 1'))
+    pool.push(P(t('AE'), t('BD'), 'Pool 2'))
+    pool.push(P(t('AD'), t('BC'), 'Pool 3'))
+    pool.push(P(t('AE'), t('BC'), 'Pool 4'))
+    pool.push(P(t('BE'), t('CD'), 'Pool 5'))
   }
-
   if (size===6){
-    schedule.push(
-      P(t('AB'), t('CD')),
-      P(t('AF'), t('BE')),
-      P(t('CD'), t('EF')),
-      P(t('AD'), t('BC')),
-      P(t('AE'), t('BF')),
-      P(t('CF'), t('DE')),
-      B(t('CD'), t('EF'), 'SF'),
-      { stage:'bracket-dynamic-final', to:15, winBy:2, label:'Final', fixedPair1: t('AB'), from:'prev-winner' }
-    )
+    pool.push(P(t('AB'), t('CD'), 'Pool 1'))
+    pool.push(P(t('AF'), t('BE'), 'Pool 2'))
+    pool.push(P(t('CD'), t('EF'), 'Pool 3'))
+    pool.push(P(t('AD'), t('BC'), 'Pool 4'))
+    pool.push(P(t('AE'), t('BF'), 'Pool 5'))
+    pool.push(P(t('CF'), t('DE'), 'Pool 6'))
   }
-
   if (size===7){
-    schedule.push(
-      P(t('AG'), t('CE')),
-      P(t('BF'), t('DG')),
-      P(t('AC'), t('EF')),
-      P(t('BD'), t('EG')),
-      P(t('AD'), t('CF')),
-      P(t('BC'), t('AF')),
-      P(t('BG'), t('DE')),
-      B(t('CD'), t('EF'), 'SF'),
-      { stage:'bracket-dynamic-final', to:15, winBy:2, label:'Final', fixedPair1: t('AB'), from:'prev-winner' }
-    )
+    pool.push(P(t('AG'), t('CE'), 'Pool 1'))
+    pool.push(P(t('BF'), t('DG'), 'Pool 2'))
+    pool.push(P(t('AC'), t('EF'), 'Pool 3'))
+    pool.push(P(t('BD'), t('EG'), 'Pool 4'))
+    pool.push(P(t('AD'), t('CF'), 'Pool 5'))
+    pool.push(P(t('BC'), t('AF'), 'Pool 6'))
+    pool.push(P(t('BG'), t('DE'), 'Pool 7'))
   }
-
   if (size===8){
-    schedule.push(
-      P(t('AC'), t('EG')),
-      P(t('BD'), t('FH')),
-      P(t('AG'), t('CE')),
-      P(t('BH'), t('DF')),
-      P(t('AE'), t('CG')),
-      P(t('BF'), t('DH')),
-      B(t('AB'), t('GH'), 'SF1'),
-      B(t('CD'), t('EF'), 'SF2'),
-      B(t('EF'), t('GH'), 'Bronze'), // losers of SFs
-      B(t('AB'), t('CD'), 'Final')   // winners of SFs
-    )
+    pool.push(P(t('AC'), t('EG'), 'Pool 1'))
+    pool.push(P(t('BD'), t('FH'), 'Pool 2'))
+    pool.push(P(t('AG'), t('CE'), 'Pool 3'))
+    pool.push(P(t('BH'), t('DF'), 'Pool 4'))
+    pool.push(P(t('AE'), t('CG'), 'Pool 5'))
+    pool.push(P(t('BF'), t('DH'), 'Pool 6'))
   }
-
-  // Expand letters to names at render time; we keep letters too for placements logic
-  return schedule
+  return pool
 }
 
-/** Compute placements at the end based on size + collected bracket results */
-function computePlacements(size, schedule, results, lettersMap){
-  const L = lettersMap
-  const placements = { 1:[], 2:[], 3:[], 4:[] }
-
-  function winnerOf(matchIdx){ const r = results[matchIdx]; return (r && r.winner) || null }
-  function loserOf(matchIdx){ const r = results[matchIdx]; return (r && r.loser)  || null }
-
-  // Helper to extract team arrays (names) from letters array like ['A','B']
-  const namesOf = (letters) => letters.map(ch => L[ch])
+// After pool completes, reseed by pool performance and build the bracket schedule using NEW letters
+function buildBracketSchedule(size){
+  const t = s => [s[0], s[1]]
+  const B = (l1,l2,label) => ({ phase:'bracket', to:15, winBy:2, pair1:l1, pair2:l2, label })
+  const BD = (from1, from2, label) => ({ phase:'bracket-derivative', to:15, winBy:2, from1, from2, label })
+  const bracket = []
 
   if (size===4){
-    // last match is Final
-    const idxFinal = schedule.findIndex(m => m.label==='Final')
-    const w = winnerOf(idxFinal); const l = loserOf(idxFinal)
-    placements[1]=w; placements[2]=l
-    return prunePlacements(placements)
+    bracket.push(B(t('AB'), t('CD'), 'Final'))
   }
-
   if (size===5){
-    const idxFinal = schedule.findIndex(m => m.label==='Final')
-    const w = winnerOf(idxFinal); const l = loserOf(idxFinal)
-    placements[1]=w; placements[2]=l
-    // 3rd is player E (single)
-    placements[3]=[L['E']]
-    return prunePlacements(placements)
+    bracket.push(B(t('AB'), t('CD'), 'Final')) // 3rd will be E by structure
   }
-
   if (size===6){
-    const idxSF = schedule.findIndex(m => m.label==='SF')
-    const idxFinal = schedule.findIndex(m => m.label==='Final')
-    const w = winnerOf(idxFinal); const l = loserOf(idxFinal)
-    placements[1]=w; placements[2]=l
-    const semiLoser = loserOf(idxSF)
-    placements[3]=semiLoser || []
-    return prunePlacements(placements)
+    bracket.push(B(t('CD'), t('EF'), 'SF'))
+    // Final = AB vs Winner(SF)
+    bracket.push(BD({ type:'fixedLetters', letters:t('AB') }, { type:'winnerOf', label:'SF' }, 'Final'))
   }
-
   if (size===7){
-    const idxSF = schedule.findIndex(m => m.label==='SF')
-    const idxFinal = schedule.findIndex(m => m.label==='Final')
-    const w = winnerOf(idxFinal); const l = loserOf(idxFinal)
-    placements[1]=w; placements[2]=l
-    placements[3]=loserOf(idxSF) || []
-    // 4th is the single player G by structure
-    placements[4]=[L['G']]
-    return prunePlacements(placements)
+    bracket.push(B(t('CD'), t('EF'), 'SF'))
+    bracket.push(BD({ type:'fixedLetters', letters:t('AB') }, { type:'winnerOf', label:'SF' }, 'Final'))
   }
-
   if (size===8){
-    const idxBronze = schedule.findIndex(m => m.label==='Bronze')
-    const idxFinal = schedule.findIndex(m => m.label==='Final')
-    placements[1]=winnerOf(idxFinal); placements[2]=loserOf(idxFinal)
-    placements[3]=winnerOf(idxBronze); placements[4]=loserOf(idxBronze)
+    bracket.push(B(t('AB'), t('GH'), 'SF1'))
+    bracket.push(B(t('CD'), t('EF'), 'SF2'))
+    // Bronze = Loser(SF1) vs Loser(SF2); Final = Winner(SF1) vs Winner(SF2)
+    bracket.push(BD({ type:'loserOf', label:'SF1' }, { type:'loserOf', label:'SF2' }, 'Bronze'))
+    bracket.push(BD({ type:'winnerOf', label:'SF1' }, { type:'winnerOf', label:'SF2' }, 'Final'))
+  }
+  return bracket
+}
+
+// Compute pool standings (per event) from pool game results only
+function computePoolStandings(poolGames){
+  const table = {} // name -> {W,L,PF,PA}
+  const ensure = (n)=> table[n] || (table[n] = {W:0,L:0,PF:0,PA:0})
+  poolGames.forEach(g=>{
+    const { team1, team2, s1, s2 } = g
+    team1.forEach(n=>{ ensure(n); table[n].PF += s1; table[n].PA += s2 })
+    team2.forEach(n=>{ ensure(n); table[n].PF += s2; table[n].PA += s1 })
+    if (s1>s2) { team1.forEach(n=> table[n].W++); team2.forEach(n=> table[n].L++) }
+    else if (s2>s1) { team2.forEach(n=> table[n].W++); team1.forEach(n=> table[n].L++) }
+  })
+  // Rank: Wins → (PF-PA) → PF → name
+  const rows = Object.keys(table).map(n=> ({ Player:n, ...table[n] }))
+  rows.sort((a,b)=>{
+    if (b.W !== a.W) return b.W - a.W
+    const da = (a.PF - a.PA), db = (b.PF - b.PA)
+    if (db !== da) return db - da
+    if (b.PF !== a.PF) return b.PF - a.PF
+    return a.Player.localeCompare(b.Player)
+  })
+  return rows.map(r=>r.Player) // ordered names, best first
+}
+
+/** Compute placements based on bracket results + bracket letters */
+function computePlacements(size, allResults, lettersBracket){
+  const placements = { 1:[], 2:[], 3:[], 4:[] }
+
+  // Helpers to fetch result objects by label
+  const byLabel = (label)=> Object.values(allResults).find(r=> r.label===label)
+
+  if (size===4){
+    const final = byLabel('Final')
+    if (final){ placements[1]=final.winner; placements[2]=final.loser }
     return prunePlacements(placements)
   }
-
+  if (size===5){
+    const final = byLabel('Final')
+    if (final){ placements[1]=final.winner; placements[2]=final.loser }
+    // 3rd is E (by bracket reseed letters)
+    if (lettersBracket['E']) placements[3] = [lettersBracket['E']]
+    return prunePlacements(placements)
+  }
+  if (size===6){
+    const sf = byLabel('SF')
+    const final = byLabel('Final')
+    if (final){ placements[1]=final.winner; placements[2]=final.loser }
+    if (sf){ placements[3]=sf.loser }
+    return prunePlacements(placements)
+  }
+  if (size===7){
+    const sf = byLabel('SF')
+    const final = byLabel('Final')
+    if (final){ placements[1]=final.winner; placements[2]=final.loser }
+    if (sf){ placements[3]=sf.loser }
+    // 4th = highest remaining seed by bracket letters (A best → G worst) not already placed
+    const placedSet = new Set([...(placements[1]||[]), ...(placements[2]||[]), ...(placements[3]||[])])
+    const order = ['A','B','C','D','E','F','G']
+    for (const L of order){ const n = lettersBracket[L]; if (n && !placedSet.has(n)) { placements[4] = [n]; break } }
+    return prunePlacements(placements)
+  }
+  if (size===8){
+    const bronze = byLabel('Bronze')
+    const final = byLabel('Final')
+    if (final){ placements[1]=final.winner; placements[2]=final.loser }
+    if (bronze){ placements[3]=bronze.winner; placements[4]=bronze.loser }
+    return prunePlacements(placements)
+  }
   return prunePlacements(placements)
 }
 
 function prunePlacements(p){
-  // Remove empty arrays and undefined placements keys without awards
   const out = {}
   Object.entries(p).forEach(([k,v])=>{ if (Array.isArray(v) && v.length) out[k]=v })
   return out
+}
+
+/** Resolve teams for any match entry, using appropriate letters map */
+function resolveTeamsForEntry(entry, lettersPool, lettersBracket, results){
+  const Lpool = lettersPool, Lbr = lettersBracket
+  const namesFromLetters = (letters, useBracket) => (useBracket?letters.map(ch=>Lbr[ch]):letters.map(ch=>Lpool[ch]))
+
+  if (entry.phase==='pool' || entry.phase==='bracket'){
+    const useBracket = entry.phase==='bracket'
+    return {
+      team1: namesFromLetters(entry.pair1, useBracket),
+      team2: namesFromLetters(entry.pair2, useBracket)
+    }
+  }
+  if (entry.phase==='bracket-derivative'){
+    const side = (from)=>{
+      if (from.type==='fixedLetters') return namesFromLetters(from.letters, true)
+      const base = Object.values(results).find(r=> r.label===from.label)
+      if (!base) return ['(TBD)', '(TBD)']
+      if (from.type==='winnerOf') return base.winner
+      if (from.type==='loserOf')  return base.loser
+      return ['(TBD)', '(TBD)']
+    }
+    return { team1: side(entry.from1), team2: side(entry.from2) }
+  }
+  return null
 }
 
 /** ============================ App Root ============================ */
@@ -372,13 +407,14 @@ function AddEventForm({ season, onAdd }){
   const [p2, setP2] = useState('')
   const [p3, setP3] = useState('')
   const [p4, setP4] = useState('')
-  const [games, setGames] = useState([])
 
   // Guided state machine
-  const [letters, setLetters] = useState(null)      // {A: name, ...}
-  const [schedule, setSchedule] = useState([])      // array of match defs
-  const [matchIdx, setMatchIdx] = useState(-1)      // -1 before start
-  const [results, setResults] = useState({})        // { idx: {team1:[names], team2:[names], s1, s2, winner:[..], loser:[..]} }
+  const [lettersPool, setLettersPool] = useState(null)     // A.. mapped for POOL
+  const [lettersBracket, setLettersBracket] = useState(null)// A.. mapped for BRACKET (reseeding)
+  const [schedule, setSchedule] = useState([])             // combined: pool then bracket
+  const [matchIdx, setMatchIdx] = useState(-1)             // index in combined schedule
+  const [results, setResults] = useState({})               // idx -> {team1,team2,s1,s2,stage,label}
+  const [games, setGames] = useState([])                   // rolling capture for ledger (with stage/label)
 
   const names = useMemo(()=> roster.split(',').map(s=>s.trim()).filter(Boolean), [roster])
   const info = POINTS_TABLE[size]
@@ -388,74 +424,73 @@ function AddEventForm({ season, onAdd }){
   const startGuided = () => {
     if (names.length !== size) return alert(`This event size requires exactly ${size} players in the roster`)
     const L = assignLetters(names, season, method)
-    setLetters(L)
-    const sched = buildSchedule(size, L)
-    setSchedule(sched)
+    setLettersPool(L)
+    const pool = buildPoolSchedule(size)
+    setSchedule(pool)       // start with pools only
     setMatchIdx(0)
     setResults({})
+    setLettersBracket(null) // not known until pools finish
+    setGames([])
   }
 
   const currentMatch = matchIdx>=0 ? schedule[matchIdx] : null
 
-  function resolveTeamsForMatch(m){
-    if (!m) return null
-    const L = letters
-    if (m.stage==='pool' || m.stage==='bracket'){
-      return {
-        team1: m.pair1.map(ch => L[ch]),
-        team2: m.pair2.map(ch => L[ch])
-      }
-    }
-    if (m.stage==='bracket-dynamic-final'){
-      // team1 is fixedPair1 (AB); team2 is winner of previous match
-      const prevIdx = schedule.findIndex(x => x.label==='SF')
-      const prev = results[prevIdx]
-      const t1 = m.fixedPair1.map(ch => L[ch])
-      const t2 = prev ? prev.winner : ['(winner TBD)','']
-      return { team1: t1, team2: t2 }
-    }
-    return null
-  }
-
-  function submitScore(e){
+  function onSubmitScore(e){
     e.preventDefault()
-    const m = currentMatch
-    if (!m) return
-    const { team1, team2 } = resolveTeamsForMatch(m)
+    if (!currentMatch) return
+
+    // Resolve teams with appropriate letters map
+    const resolved = resolveTeamsForEntry(currentMatch, lettersPool, lettersBracket, results)
+    const team1 = resolved.team1, team2 = resolved.team2
     const s1 = +(e.target.s1.value||0)
     const s2 = +(e.target.s2.value||0)
 
-    // basic validation (soft)
-    if (m.stage!=='pool'){
-      // bracket: prefer to 15 win-by-2
-      if (Math.max(s1,s2) < 11) { if (!confirm('Bracket games are typically to 15. Continue?')) return }
-      if (Math.abs(s1-s2) < 2)  { if (!confirm('Bracket games are win-by-2. Continue?')) return }
+    // Soft validation
+    if (currentMatch.phase!=='pool'){
+      if (Math.max(s1,s2) < 11 && !confirm('Bracket games are typically to 15. Continue?')) return
+      if (Math.abs(s1-s2) < 2 && !confirm('Bracket games are win-by-2. Continue?')) return
     } else {
-      // pool: to 11, win-by-1
-      if (Math.max(s1,s2) < 11) { if (!confirm('Pool games are typically to 11. Continue?')) return }
+      if (Math.max(s1,s2) < 11 && !confirm('Pool games are typically to 11. Continue?')) return
     }
 
     const winner = s1>s2 ? team1 : team2
     const loser  = s1>s2 ? team2 : team1
 
-    const rec = { team1, team2, s1, s2, winner, loser, stage:m.stage, label:m.label||'' }
+    const rec = { team1, team2, s1, s2, winner, loser, stage: currentMatch.phase, label: currentMatch.label||'' }
     setResults(r => ({ ...r, [matchIdx]: rec }))
-    setGames(g => [...g, { team1, team2, s1, s2 }])
+    setGames(g => [...g, rec])
 
-    // advance or finish
-    if (matchIdx < schedule.length - 1){
+    const lastIndex = schedule.length - 1
+
+    if (matchIdx < lastIndex){
+      // If just finished the last POOL game, generate bracket with reseeded letters and append
+      const justFinished = matchIdx
+      const allPoolsDone = schedule.every((m, idx)=> idx<=justFinished ? m.phase!=='pool' || rHas(results, idx) || idx===justFinished : true)
+      const hadBracket = schedule.some(m=> m.phase!=='pool')
+
+      if (!hadBracket && allPoolsDone){
+        // Compute pool standings from recorded pool games
+        const poolGames = [...Object.values({ ...results, [matchIdx]: rec })].filter(x=> x.stage==='pool')
+        const orderedNames = computePoolStandings(poolGames) // best → worst
+        const letters = {}
+        const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        orderedNames.forEach((name, i)=> letters[alpha[i]] = name)
+        setLettersBracket(letters)
+
+        // Append bracket schedule using reseeded letters
+        const br = buildBracketSchedule(size)
+        setSchedule(prev => [...prev, ...br])
+      }
+
       setMatchIdx(matchIdx + 1)
     } else {
-      // finished all matches → compute placements and submit event
-      const placements = computePlacements(size, schedule, { ...results, [matchIdx]: rec }, letters)
-      onAdd({ size, placements, gameStats: [...games, { team1, team2, s1, s2 }] })
-      // reset guided state
-      setMatchIdx(-1); setSchedule([]); setResults({}); setLetters(null); setGames([])
+      // Event finished → compute placements and save
+      const placements = computePlacements(size, { ...results, [matchIdx]: rec }, lettersBracket || lettersPool)
+      onAdd({ size, placements, gameStats: games.concat(rec) })
+      // Reset guided state
+      setMatchIdx(-1); setSchedule([]); setResults({}); setLettersPool(null); setLettersBracket(null); setGames([])
     }
   }
-
-  const updateGame = (idx, key, val)=> setGames(g=> g.map((row,i)=> i===idx? { ...row, [key]:val } : row))
-  const addGameRow = ()=> setGames(g=>[...g, { team1:["",""], team2:["",""], s1:11, s2:8 }])
 
   return (
     <section className="card">
@@ -490,7 +525,7 @@ function AddEventForm({ season, onAdd }){
         {guided && (
           <div className="grid" style={{gap:8}}>
             <div>
-              <label>Seeding Method</label>
+              <label>Seeding Method for Pool Letters</label>
               <select value={method} onChange={e=>setMethod(e.target.value)}>
                 <option value="standings">Use current standings</option>
                 <option value="random">Randomize (Week 1 / newcomers)</option>
@@ -500,96 +535,67 @@ function AddEventForm({ season, onAdd }){
               <button className="btn" onClick={startGuided}>Start Guided Matchday</button>
             </div>
 
-            {letters && (
+            {/* Pool letter assignments */}
+            {lettersPool && (
               <div className="card" style={{border:'1px dashed #e5e7eb'}}>
-                <strong>Letter Assignments:</strong>
+                <strong>Pool Letters:</strong>
                 <div className="row" style={{gap:12, flexWrap:'wrap', marginTop:8}}>
-                  {Object.entries(letters).map(([k,v])=> (
-                    <span key={k}><strong>{k}</strong>= {v}</span>
-                  ))}
+                  {Object.entries(lettersPool).map(([k,v])=> (<span key={k}><strong>{k}</strong>= {v}</span>))}
                 </div>
               </div>
             )}
 
+            {/* Bracket letters after reseed */}
+            {lettersBracket && (
+              <div className="card" style={{border:'1px dashed #e5e7eb'}}>
+                <strong>Bracket Letters (after pool reseed):</strong>
+                <div className="row" style={{gap:12, flexWrap:'wrap', marginTop:8}}>
+                  {Object.entries(lettersBracket).map(([k,v])=> (<span key={k}><strong>{k}</strong>= {v}</span>))}
+                </div>
+              </div>
+            )}
+
+            {/* Current match prompt */}
             {matchIdx>=0 && (
               <GuidedMatchPrompt
-                match={currentMatch}
-                schedule={schedule}
+                entry={currentMatch}
+                lettersPool={lettersPool}
+                lettersBracket={lettersBracket}
                 results={results}
-                resolveTeams={()=>resolveTeamsForMatch(currentMatch)}
-                onSubmit={submitScore}
+                onSubmit={onSubmitScore}
                 matchIdx={matchIdx}
                 total={schedule.length}
               />
+            )}
+
+            {/* Live log of all matches this event */}
+            {games.length>0 && (
+              <div className="card">
+                <strong>Logged Matches (this event)</strong>
+                <table style={{marginTop:8, width:'100%'}}>
+                  <thead>
+                    <tr><th>#</th><th>Stage</th><th>Label</th><th>Team 1</th><th>Team 2</th><th>Score</th></tr>
+                  </thead>
+                  <tbody>
+                    {games.map((g,i)=> (
+                      <tr key={i}>
+                        <td>{i+1}</td>
+                        <td>{g.stage}</td>
+                        <td>{g.label}</td>
+                        <td>{g.team1.join(' & ')}</td>
+                        <td>{g.team2.join(' & ')}</td>
+                        <td>{g.s1}–{g.s2}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         )}
 
         {!guided && (
-          <div className="grid" style={{gap:16}}>
-            <h3 style={{margin:'8px 0'}}>Manual Placements</h3>
-            <div className="row" style={{gap:8, flexWrap:'wrap'}}>
-              <div>
-                <label>Champions (1st) — Player 1</label>
-                <input list="rosterlist" value={p1} onChange={e=>setP1(e.target.value)} placeholder="Player" />
-              </div>
-              <div>
-                <label>Champions (1st) — Player 2</label>
-                <input list="rosterlist" value={p2} onChange={e=>setP2(e.target.value)} placeholder="Player" />
-              </div>
-              <div>
-                <label>Runners-up (2nd) — Player 1</label>
-                <input list="rosterlist" value={p3} onChange={e=>setP3(e.target.value)} placeholder="Player" />
-              </div>
-              <div>
-                <label>Runners-up (2nd) — Player 2</label>
-                <input list="rosterlist" value={p4} onChange={e=>setP4(e.target.value)} placeholder="Player" />
-              </div>
-            </div>
-
-            {(POINTS_TABLE[size].awards[3] || POINTS_TABLE[size].awards[4]) && (
-              <div className="row" style={{gap:8, flexWrap:'wrap'}}>
-                {POINTS_TABLE[size].awards[3] && (
-                  <div>
-                    <label>Third Place (single player)</label>
-                    <input list="rosterlist" value={p3} onChange={e=>setP3(e.target.value)} placeholder="Player" />
-                  </div>
-                )}
-                {POINTS_TABLE[size].awards[4] && (
-                  <div>
-                    <label>Fourth Place (single player)</label>
-                    <input list="rosterlist" value={p4} onChange={e=>setP4(e.target.value)} placeholder="Player" />
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div>
-              <div className="muted">Optional: enter game scores to accumulate Wins/Losses & PF/PA</div>
-              <button type="button" className="btn" onClick={()=>setGames(g=>[...g, { team1:["",""], team2:["",""], s1:11, s2:8 }])}>Add Game</button>
-            </div>
-
-            {games.map((g,idx)=> (
-              <div key={idx} className="grid" style={{gridTemplateColumns:"repeat(12, 1fr)", gap:8}}>
-                <input list="rosterlist" value={g.team1?.[0]||''} onChange={e=>updateGame(idx,'team1',[e.target.value, g.team1?.[1]||''])} placeholder="Team1 P1" />
-                <input list="rosterlist" value={g.team1?.[1]||''} onChange={e=>updateGame(idx,'team1',[g.team1?.[0]||'', e.target.value])} placeholder="Team1 P2" />
-                <input list="rosterlist" value={g.team2?.[0]||''} onChange={e=>updateGame(idx,'team2',[e.target.value, g.team2?.[1]||''])} placeholder="Team2 P1" />
-                <input list="rosterlist" value={g.team2?.[1]||''} onChange={e=>updateGame(idx,'team2',[g.team2?.[0]||'', e.target.value])} placeholder="Team2 P2" />
-                <input type="number" min="0" value={g.s1} onChange={e=>updateGame(idx,'s1',e.target.value)} />
-                <input type="number" min="0" value={g.s2} onChange={e=>updateGame(idx,'s2',e.target.value)} />
-              </div>
-            ))}
-
-            <button className="btn primary" onClick={(e)=>{
-              e.preventDefault()
-              if (!p1||!p2||!p3||!p4) return alert('Please fill 1st and 2nd pairs (two players each). For sizes that award 3rd/4th, also fill those.')
-              const placements = { 1:[p1,p2], 2:[p3,p4] }
-              if (POINTS_TABLE[size].awards[3]) placements[3] = [p3] // allow single player entry
-              if (POINTS_TABLE[size].awards[4]) placements[4] = [p4]
-              const gameStats = games.filter(g=>g.team1[0]&&g.team1[1]&&g.team2[0]&&g.team2[1]).map(g=>({ team1:g.team1, team2:g.team2, s1:+g.s1, s2:+g.s2 }))
-              onAdd({ size, placements, gameStats })
-            }}>Add Event to Standings</button>
-          </div>
+          <ManualPlacements size={size} onAdd={onAdd} names={names} />
         )}
       </div>
 
@@ -601,14 +607,16 @@ function AddEventForm({ season, onAdd }){
   )
 }
 
-function GuidedMatchPrompt({ match, schedule, results, resolveTeams, onSubmit, matchIdx, total }){
-  const resolved = resolveTeams()
-  const label = match.label || (match.stage==='pool' ? `Pool` : 'Bracket')
+function rHas(obj, idx){ return Object.prototype.hasOwnProperty.call(obj, idx) }
+
+function GuidedMatchPrompt({ entry, lettersPool, lettersBracket, results, onSubmit, matchIdx, total }){
+  const resolved = resolveTeamsForEntry(entry, lettersPool, lettersBracket, results)
+  const label = entry.label || (entry.phase==='pool' ? `Pool` : 'Bracket')
   return (
     <form onSubmit={onSubmit} className="card" style={{marginTop:12}}>
       <div className="row" style={{justifyContent:'space-between'}}>
         <strong>Match {matchIdx+1} of {total} — {label}</strong>
-        <span className="muted">{match.stage==='pool' ? 'to 11, win by 1' : 'to 15, win by 2'}</span>
+        <span className="muted">{entry.phase==='pool' ? 'to 11, win by 1' : 'to 15, win by 2'}</span>
       </div>
       <div className="row" style={{gap:8, flexWrap:'wrap', marginTop:8}}>
         <strong>{resolved?.team1?.join(' & ')} </strong>
@@ -624,35 +632,127 @@ function GuidedMatchPrompt({ match, schedule, results, resolveTeams, onSubmit, m
   )
 }
 
+function ManualPlacements({ size, onAdd, names }){
+  const [p1, setP1] = useState('')
+  const [p2, setP2] = useState('')
+  const [p3, setP3] = useState('')
+  const [p4, setP4] = useState('')
+  const [games, setGames] = useState([])
+
+  return (
+    <div className="grid" style={{gap:16}}>
+      <h3 style={{margin:'8px 0'}}>Manual Placements</h3>
+      <div className="row" style={{gap:8, flexWrap:'wrap'}}>
+        <div>
+          <label>Champions (1st) — Player 1</label>
+          <input list="rosterlist" value={p1} onChange={e=>setP1(e.target.value)} placeholder="Player" />
+        </div>
+        <div>
+          <label>Champions (1st) — Player 2</label>
+          <input list="rosterlist" value={p2} onChange={e=>setP2(e.target.value)} placeholder="Player" />
+        </div>
+        <div>
+          <label>Runners-up (2nd) — Player 1</label>
+          <input list="rosterlist" value={p3} onChange={e=>setP3(e.target.value)} placeholder="Player" />
+        </div>
+        <div>
+          <label>Runners-up (2nd) — Player 2</label>
+          <input list="rosterlist" value={p4} onChange={e=>setP4(e.target.value)} placeholder="Player" />
+        </div>
+      </div>
+
+      <div>
+        <div className="muted">Optional: enter game scores to accumulate Wins/Losses & PF/PA</div>
+        <button type="button" className="btn" onClick={()=>setGames(g=>[...g, { team1:["",""], team2:["",""], s1:11, s2:8, stage:'manual', label:'' }])}>Add Game</button>
+      </div>
+
+      {games.map((g,idx)=> (
+        <div key={idx} className="grid" style={{gridTemplateColumns:"repeat(12, 1fr)", gap:8}}>
+          <input list="rosterlist" value={g.team1?.[0]||''} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, team1:[e.target.value, row.team1?.[1]||''] } : row))} placeholder="Team1 P1" />
+          <input list="rosterlist" value={g.team1?.[1]||''} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, team1:[row.team1?.[0]||'', e.target.value] } : row))} placeholder="Team1 P2" />
+          <input list="rosterlist" value={g.team2?.[0]||''} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, team2:[e.target.value, row.team2?.[1]||''] } : row))} placeholder="Team2 P1" />
+          <input list="rosterlist" value={g.team2?.[1]||''} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, team2:[row.team2?.[0]||'', e.target.value] } : row))} placeholder="Team2 P2" />
+          <input type="number" min="0" value={g.s1} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, s1:+e.target.value } : row))} />
+          <input type="number" min="0" value={g.s2} onChange={e=>setGames(arr=>arr.map((row,i)=> i===idx? { ...row, s2:+e.target.value } : row))} />
+        </div>
+      ))}
+
+      <button className="btn primary" onClick={(e)=>{
+        e.preventDefault()
+        if (!p1||!p2||!p3||!p4) return alert('Please fill 1st and 2nd pairs (two players each). For sizes that award 3rd/4th, we will prompt next screen if needed.')
+        const placements = { 1:[p1,p2], 2:[p3,p4] }
+        if (POINTS_TABLE[size].awards[3] && !placements[3]) {
+          const candidate = names.find(n=> ![p1,p2,p3,p4].includes(n))
+          if (candidate) placements[3] = [candidate]
+        }
+        if (POINTS_TABLE[size].awards[4] && !placements[4]) {
+          const remaining = names.find(n=> ![p1,p2,p3,p4].includes(n) && !(placements[3]||[]).includes(n))
+          if (remaining) placements[4] = [remaining]
+        }
+        onAdd({ size, placements, gameStats: games })
+      }}>Add Event to Standings</button>
+    </div>
+  )
+}
+
 function HistoryView({ events, onDelete }){
   return (
     <section className="card">
       <h2 style={{marginTop:0}}>Event History</h2>
       {!events.length && <p className="muted">No events yet.</p>}
       {!!events.length && (
-        <table>
-          <thead>
-            <tr><th>#</th><th>Size</th><th>Placements</th><th>Actions</th></tr>
-          </thead>
-          <tbody>
-            {events.map((ev, idx)=>(
-              <tr key={ev.id}>
-                <td>{idx+1}</td>
-                <td>{ev.size}</td>
-                <td>
-                  {Object.entries(ev.placements).map(([place, arr])=> (
-                    <span key={place} style={{marginRight:8}}>
-                      <strong>{place}:</strong> {arr.join(', ')}
-                    </span>
-                  ))}
-                </td>
-                <td>
-                  <button className="btn" onClick={()=>onDelete(ev.id)}>Delete</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <table>
+            <thead>
+              <tr><th>#</th><th>Size</th><th>Placements</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {events.map((ev, idx)=>(
+                <tr key={ev.id}>
+                  <td>{idx+1}</td>
+                  <td>{ev.size}</td>
+                  <td>
+                    {Object.entries(ev.placements).map(([place, arr])=> (
+                      <span key={place} style={{marginRight:8}}>
+                        <strong>{place}:</strong> {arr.join(', ')}
+                      </span>
+                    ))}
+                  </td>
+                  <td>
+                    <button className="btn" onClick={()=>onDelete(ev.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Full games log per event */}
+          {events.map((ev, idx)=> (
+            <div key={`glog-${ev.id}`} className="card" style={{marginTop:12}}>
+              <strong>Event {idx+1} — Games Log</strong>
+              {!ev.gameStats?.length && <p className="muted">(No individual games recorded for this event)</p>}
+              {!!ev.gameStats?.length && (
+                <table style={{marginTop:8, width:'100%'}}>
+                  <thead>
+                    <tr><th>#</th><th>Stage</th><th>Label</th><th>Team 1</th><th>Team 2</th><th>Score</th></tr>
+                  </thead>
+                  <tbody>
+                    {ev.gameStats.map((g,i)=> (
+                      <tr key={i}>
+                        <td>{i+1}</td>
+                        <td>{g.stage || ''}</td>
+                        <td>{g.label || ''}</td>
+                        <td>{(g.team1||[]).join(' & ')}</td>
+                        <td>{(g.team2||[]).join(' & ')}</td>
+                        <td>{g.s1}–{g.s2}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ))}
+        </>
       )}
       <p className="muted" style={{marginTop:8}}>Deleting an event will instantly recompute the standings from the remaining events.</p>
     </section>
@@ -699,7 +799,7 @@ function DataPanel({ setEvents }){
           const gameStats = games.map(r => ({
             team1:[String(r[0]).trim(), String(r[1]).trim()],
             team2:[String(r[2]).trim(), String(r[3]).trim()],
-            s1:+r[4], s2:+r[5]
+            s1:+r[4], s2:+r[5], stage:'', label:''
           }))
           let placements = {}
           if (size===4) {
@@ -708,7 +808,9 @@ function DataPanel({ setEvents }){
             const runners = f.s1>f.s2 ? f.team2 : f.team1
             placements = { 1: champs, 2: runners }
           } else if (size===8) {
-            const [sf1,sf2,bronze,final] = gameStats.slice(-4)
+            const last4 = gameStats.slice(-4)
+            const final = last4[last4.length-1]
+            const bronze = last4[last4.length-2]
             const champs  = final.s1>final.s2 ? final.team1 : final.team2
             const runners = final.s1>final.s2 ? final.team2 : final.team1
             const third   = bronze.s1>bronze.s2 ? bronze.team1 : bronze.team2
