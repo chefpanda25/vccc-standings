@@ -5,6 +5,7 @@ import Papa from 'papaparse'
  *  Violet Crown Pickleball — Standings App (Guided Matchday + Reseed Bracket)
  *  - Events ledger (undo + history) and recomputation of standings
  *  - Guided Matchday for 4/5/6/7/8 with **post-pool reseeding**
+ *  - Pool Standings audit table + tie-break notes (Wins → Diff → PF → H2H → Random)
  *  - Shows every logged game (stage-labeled) while adding AND in history
  *  - Manual placements still available
  *  - CSV import (4p/8p heuristic) and JSON backup of events ledger
@@ -78,10 +79,11 @@ function applyEventToSeason(season, ev) {
 
   // Per-game stats (PF/PA + W/L). Note: each player on a team gets the team score.
   gameStats.forEach(({ team1=[], team2=[], s1=0, s2=0 })=>{
-    team1.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += +s1; next[p].PA += +s2 })
-    team2.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += +s2; next[p].PA += +s1 })
-    if (s1 > s2) { team1.forEach(p=> next[p].Wins++); team2.forEach(p=> next[p].Losses++) }
-    else if (s2 > s1) { team2.forEach(p=> next[p].Wins++); team1.forEach(p=> next[p].Losses++) }
+    const a = +s1, b = +s2
+    team1.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += a; next[p].PA += b })
+    team2.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += b; next[p].PA += a })
+    if (a > b) { team1.forEach(p=> next[p].Wins++); team2.forEach(p=> next[p].Losses++) }
+    else if (b > a) { team2.forEach(p=> next[p].Wins++); team1.forEach(p=> next[p].Losses++) }
   })
 
   return next
@@ -200,27 +202,82 @@ function buildBracketSchedule(size){
   return bracket
 }
 
-// Compute pool standings (per event) from pool game results only
-function computePoolStandings(poolGames){
+// Compute pool stats table from pool games only
+function computePoolStats(poolGames){
   const table = {} // name -> {W,L,PF,PA}
   const ensure = (n)=> table[n] || (table[n] = {W:0,L:0,PF:0,PA:0})
+  const playersSet = new Set()
   poolGames.forEach(g=>{
     const { team1=[], team2=[], s1=0, s2=0 } = g
-    team1.forEach(n=>{ ensure(n); table[n].PF += +s1; table[n].PA += +s2 })
-    team2.forEach(n=>{ ensure(n); table[n].PF += +s2; table[n].PA += +s1 })
-    if (s1>s2) { team1.forEach(n=> table[n].W++); team2.forEach(n=> table[n].L++) }
-    else if (s2>s1) { team2.forEach(n=> table[n].W++); team1.forEach(n=> table[n].L++) }
+    const a = +s1, b = +s2
+    team1.forEach(n=>{ playersSet.add(n); ensure(n); table[n].PF += a; table[n].PA += b })
+    team2.forEach(n=>{ playersSet.add(n); ensure(n); table[n].PF += b; table[n].PA += a })
+    if (a>b) { team1.forEach(n=> table[n].W++); team2.forEach(n=> table[n].L++) }
+    else if (b>a) { team2.forEach(n=> table[n].W++); team1.forEach(n=> table[n].L++) }
   })
-  // Rank: Wins → (PF-PA) → PF → name
-  const rows = Object.keys(table).map(n=> ({ Player:n, ...table[n] }))
+
+  // Build head-to-head wins matrix (i beats j) for pool
+  const h2h = {}
+  const entries = Object.keys(table)
+  entries.forEach(i=>{ h2h[i]={} })
+  poolGames.forEach(g=>{
+    const aWin = +g.s1 > +g.s2
+    g.team1.forEach(i=>{
+      g.team2.forEach(j=>{
+        h2h[i][j] = (h2h[i][j]||0) + (aWin?1:0)
+        h2h[j][i] = (h2h[j][i]||0) + (aWin?0:1)
+      })
+    })
+  })
+
+  // Primary sort: Wins → Diff → PF
+  let rows = entries.map(n=> ({ Player:n, ...table[n], Diff: table[n].PF - table[n].PA }))
   rows.sort((a,b)=>{
     if (b.W !== a.W) return b.W - a.W
-    const da = (a.PF - a.PA), db = (b.PF - b.PA)
-    if (db !== da) return db - da
+    if ((b.Diff) !== (a.Diff)) return b.Diff - a.Diff
     if (b.PF !== a.PF) return b.PF - a.PF
     return a.Player.localeCompare(b.Player)
   })
-  return rows.map(r=>r.Player) // ordered names, best first
+
+  const notes = []
+
+  // Apply head-to-head when exactly two players remain tied after PF
+  for (let i=0; i<rows.length-1; i++){
+    let j=i
+    // find tie block where W,Diff,PF are equal
+    while (j+1<rows.length && rows[j+1].W===rows[i].W && rows[j+1].Diff===rows[i].Diff && rows[j+1].PF===rows[i].PF){ j++ }
+    const blockSize = j-i+1
+    if (blockSize===2){
+      const A = rows[i], B = rows[i+1]
+      const aWins = (h2h[A.Player]?.[B.Player])||0
+      const bWins = (h2h[B.Player]?.[A.Player])||0
+      if (aWins !== bWins){
+        // reorder to put head-to-head winner first
+        if (bWins > aWins){ [rows[i], rows[i+1]] = [rows[i+1], rows[i]] }
+        notes.push(`Head-to-head tiebreak used between ${A.Player} and ${B.Player}`)
+      } else {
+        // deterministic random draw
+        const pair = [A.Player, B.Player]
+        const ordered = shuffleDeterministic(pair)
+        if (ordered[0] !== A.Player){ [rows[i], rows[i+1]] = [rows[i+1], rows[i]] }
+        notes.push(`Random draw used between ${pair.join(' & ')}`)
+      }
+    }
+    if (blockSize>2){
+      // deterministic shuffle of the block; mention random draw
+      const block = rows.slice(i, j+1)
+      const names = block.map(r=>r.Player)
+      const shuffled = shuffleDeterministic(names)
+      const map = new Map(shuffled.map((n,idx)=>[n, idx]))
+      rows.splice(i, blockSize, ...block.sort((x,y)=> (map.get(x.Player)-map.get(y.Player))))
+      notes.push(`Random draw used among ${names.join(', ')}`)
+    }
+    i=j
+  }
+
+  // Add rank numbers
+  rows = rows.map((r, idx)=> ({ ...r, Rank: idx+1 }))
+  return { rows, notes }
 }
 
 /** Compute placements based on bracket results + bracket letters (after reseed) */
@@ -326,8 +383,8 @@ export default function App(){
     }))
   }, [season])
 
-  const addPlacementEvent = ({ size, placements, gameStats }) => {
-    setEvents(prev => [...prev, { id: Date.now(), size, placements, gameStats }])
+  const addPlacementEvent = ({ size, placements, gameStats, poolAudit }) => {
+    setEvents(prev => [...prev, { id: Date.now(), size, placements, gameStats, poolAudit }])
     alert('Event added to standings')
   }
 
@@ -414,9 +471,11 @@ function AddEventForm({ season, onAdd }){
   const [lettersPool, setLettersPool] = useState(null)     // A.. mapped for POOL
   const [lettersBracket, setLettersBracket] = useState(null)// A.. mapped for BRACKET (reseeding)
   const [schedule, setSchedule] = useState([])             // combined: pool then bracket
+  const [poolLen, setPoolLen] = useState(0)
   const [matchIdx, setMatchIdx] = useState(-1)             // index in combined schedule
   const [results, setResults] = useState({})               // idx -> {team1,team2,s1,s2,stage,label}
   const [games, setGames] = useState([])                   // rolling capture for ledger (with stage/label)
+  const [poolAudit, setPoolAudit] = useState(null)         // { rows, notes }
 
   // Manual placements (fallback)
   const [p1, setP1] = useState('')
@@ -425,82 +484,83 @@ function AddEventForm({ season, onAdd }){
   const [p4, setP4] = useState('')
 
   const names = useMemo(()=> roster.split(',').map(s=>s.trim()).filter(Boolean), [roster])
-  const info = POINTS_TABLE[size]
-  const needsThird  = Boolean(info.awards[3])
-  const needsSeventh= Boolean(info.awards[7])
-  const needsFifth  = Boolean(info.awards[5])
 
   const startGuided = () => {
     if (names.length !== size) return alert(`This event size requires exactly ${size} players in the roster`)
     const L = assignLetters(names, season, method)
     setLettersPool(L)
     const pool = buildPoolSchedule(size)
-    setSchedule(pool)       // start with pools only
+    setSchedule(pool)
+    setPoolLen(pool.length)
     setMatchIdx(0)
     setResults({})
-    setLettersBracket(null) // not known until pools finish
+    setLettersBracket(null)
     setGames([])
+    setPoolAudit(null)
   }
 
-  const currentMatch = matchIdx>=0 ? schedule[matchIdx] : null
+  const currentEntry = matchIdx>=0 ? schedule[matchIdx] : null
 
   function onSubmitScore(e){
     e.preventDefault()
-    if (!currentMatch) return
+    if (!currentEntry) return
 
-    // Resolve teams with appropriate letters map
-    const resolved = resolveTeamsForEntry(currentMatch, lettersPool, lettersBracket, results)
+    const resolved = resolveTeamsForEntry(currentEntry, lettersPool, lettersBracket, results)
     const team1 = resolved.team1, team2 = resolved.team2
-    const s1 = +(e.target.s1.value||0)
-    const s2 = +(e.target.s2.value||0)
+    const a = +(e.target.s1.value||0)
+    const b = +(e.target.s2.value||0)
 
-    // Soft validation
-    if (currentMatch.phase!=='pool'){
-      if (Math.max(s1,s2) < 11 && !confirm('Bracket games are typically to 15. Continue?')) return
-      if (Math.abs(s1-s2) < 2 && !confirm('Bracket games are win-by-2. Continue?')) return
+    if (currentEntry.phase!=='pool'){
+      if (Math.max(a,b) < 11 && !confirm('Bracket games are typically to 15. Continue?')) return
+      if (Math.abs(a-b) < 2 && !confirm('Bracket games are win-by-2. Continue?')) return
     } else {
-      if (Math.max(s1,s2) < 11 && !confirm('Pool games are typically to 11. Continue?')) return
+      if (Math.max(a,b) < 11 && !confirm('Pool games are typically to 11. Continue?')) return
     }
 
-    const winner = s1>s2 ? team1 : team2
-    const loser  = s1>s2 ? team2 : team1
+    const winner = a>b ? team1 : team2
+    const loser  = a>b ? team2 : team1
 
-    const rec = { team1, team2, s1:+s1, s2:+s2, winner, loser, stage: currentMatch.phase, label: currentMatch.label||'' }
+    const rec = { team1, team2, s1:a, s2:b, winner, loser, stage: currentEntry.phase, label: currentEntry.label||'' }
     setResults(r => ({ ...r, [matchIdx]: rec }))
     setGames(g => [...g, rec])
 
-    const lastIndex = schedule.length - 1
+    // If this was the last pool match, reseed & append bracket
+    if (matchIdx === poolLen - 1){
+      const poolGames = [...Object.values({ ...results, [matchIdx]: rec })].filter(x=> x.stage==='pool')
+      const audit = computePoolStats(poolGames)
+      setPoolAudit(audit)
 
-    if (matchIdx < lastIndex){
-      // If just finished the last POOL game, generate bracket with reseeded letters and append
-      const justFinished = matchIdx
-      const hasBracketAlready = schedule.some(m=> m.phase!=='pool')
-      const allPoolsEntered = !schedule.slice(0).some((m, idx)=> m.phase==='pool' && idx<=justFinished && !(idx===justFinished || Object.prototype.hasOwnProperty.call(results, idx)))
+      // Build bracket letters using pool standings order
+      const letters = {}
+      const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+      audit.rows.forEach((row, i)=> { letters[alpha[i]] = row.Player })
+      setLettersBracket(letters)
 
-      if (!hasBracketAlready && allPoolsEntered){
-        // Compute pool standings from recorded pool games
-        const poolGames = [...Object.values({ ...results, [matchIdx]: rec })].filter(x=> x.stage==='pool')
-        const orderedNames = computePoolStandings(poolGames) // best → worst
-        const letters = {}
-        const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        orderedNames.forEach((name, i)=> letters[alpha[i]] = name)
-        setLettersBracket(letters)
+      const br = buildBracketSchedule(size)
+      setSchedule(prev => [...prev, ...br])
+      setMatchIdx(matchIdx + 1)
+      return
+    }
 
-        // Append bracket schedule using reseeded letters
-        const br = buildBracketSchedule(size)
-        setSchedule(prev => [...prev, ...br])
-      }
-
+    // If not last schedule entry, advance
+    if (matchIdx < schedule.length - 1){
       setMatchIdx(matchIdx + 1)
     } else {
-      // Event finished → compute placements and save (ensure last game is included)
+      // Event finished → compute placements and save
       const finalGames = [...games, rec]
       const placements = computePlacements(size, { ...results, [matchIdx]: rec }, lettersBracket || lettersPool)
-      onAdd({ size, placements, gameStats: finalGames })
-      // Reset guided state
-      setMatchIdx(-1); setSchedule([]); setResults({}); setLettersPool(null); setLettersBracket(null); setGames([])
+      onAdd({ size, placements, gameStats: finalGames, poolAudit })
+      // Reset
+      setMatchIdx(-1); setSchedule([]); setResults({}); setLettersPool(null); setLettersBracket(null); setGames([]); setPoolAudit(null); setPoolLen(0)
     }
   }
+
+  // If event finished (after bracket), the last submit will call onAdd above; we also need a final call when schedule ends
+  useEffect(()=>{
+    if (matchIdx>=0 && matchIdx === schedule.length){
+      // safety no-op
+    }
+  }, [matchIdx, schedule.length])
 
   return (
     <section className="card">
@@ -566,9 +626,9 @@ function AddEventForm({ season, onAdd }){
             )}
 
             {/* Current match prompt */}
-            {matchIdx>=0 && (
+            {matchIdx>=0 && matchIdx < schedule.length && (
               <GuidedMatchPrompt
-                entry={currentMatch}
+                entry={currentEntry}
                 lettersPool={lettersPool}
                 lettersBracket={lettersBracket}
                 results={results}
@@ -576,6 +636,37 @@ function AddEventForm({ season, onAdd }){
                 matchIdx={matchIdx}
                 total={schedule.length}
               />
+            )}
+
+            {/* Pool Standings audit table (appears right after pools finish) */}
+            {poolAudit && (
+              <div className="card">
+                <strong>Pool Standings (for reseed)</strong>
+                <table style={{marginTop:8, width:'100%'}}>
+                  <thead>
+                    <tr><th>Rank</th><th>Player</th><th>W</th><th>L</th><th>PF</th><th>PA</th><th>Diff</th></tr>
+                  </thead>
+                  <tbody>
+                    {poolAudit.rows.map(r=> (
+                      <tr key={r.Player}>
+                        <td>{r.Rank}</td>
+                        <td>{r.Player}</td>
+                        <td>{r.W}</td>
+                        <td>{r.L}</td>
+                        <td>{r.PF}</td>
+                        <td>{r.PA}</td>
+                        <td>{r.Diff}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {poolAudit.notes?.length>0 && (
+                  <ul className="muted" style={{marginTop:8}}>
+                    {poolAudit.notes.map((n,i)=> <li key={i}>{n}</li>)}
+                  </ul>
+                )}
+                <p className="muted" style={{marginTop:8}}>Tiebreakers applied in order: Wins → Point Differential → Points For → Head-to-head → Random (noted above if used).</p>
+              </div>
             )}
 
             {/* Live log of all matches this event */}
@@ -605,7 +696,7 @@ function AddEventForm({ season, onAdd }){
         )}
 
         {!guided && (
-          <ManualPlacements size={size} onAdd={onAdd} names={names} />
+          <ManualPlacements names={names} size={size} onAdd={(payload)=> onAdd(payload)} />
         )}
       </div>
 
@@ -640,7 +731,7 @@ function GuidedMatchPrompt({ entry, lettersPool, lettersBracket, results, onSubm
   )
 }
 
-function ManualPlacements({ size, onAdd, names }){
+function ManualPlacements({ names, size, onAdd }){
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
   const [p3, setP3] = useState('')
@@ -689,15 +780,6 @@ function ManualPlacements({ size, onAdd, names }){
         e.preventDefault()
         if (!p1||!p2||!p3||!p4) return alert('Please fill 1st and 2nd pairs (two players each).')
         const placements = { 1:[p1,p2], 2:[p3,p4] }
-        // Add last-place awards if applicable (5th/7th) based on remaining roster
-        if (POINTS_TABLE[size].awards[5]) {
-          const remaining = names.find(n=> ![p1,p2,p3,p4].includes(n))
-          if (remaining) placements[5] = [remaining]
-        }
-        if (POINTS_TABLE[size].awards[7]) {
-          const others = names.filter(n=> ![p1,p2,p3,p4].includes(n))
-          if (others.length) placements[7] = [others[others.length-1]] // rough fallback
-        }
         onAdd({ size, placements, gameStats: games })
       }}>Add Event to Standings</button>
     </div>
@@ -734,6 +816,41 @@ function HistoryView({ events, onDelete }){
               ))}
             </tbody>
           </table>
+
+          {/* Pool standings snapshot per event */}
+          {events.map((ev, idx)=> (
+            <div key={`pool-${ev.id}`} className="card" style={{marginTop:12}}>
+              <strong>Event {idx+1} — Pool Standings</strong>
+              {!ev.poolAudit?.rows?.length && <p className="muted">(No pool standings recorded)</p>}
+              {!!ev.poolAudit?.rows?.length && (
+                <>
+                  <table style={{marginTop:8, width:'100%'}}>
+                    <thead>
+                      <tr><th>Rank</th><th>Player</th><th>W</th><th>L</th><th>PF</th><th>PA</th><th>Diff</th></tr>
+                    </thead>
+                    <tbody>
+                      {ev.poolAudit.rows.map(r=> (
+                        <tr key={r.Player}>
+                          <td>{r.Rank}</td>
+                          <td>{r.Player}</td>
+                          <td>{r.W}</td>
+                          <td>{r.L}</td>
+                          <td>{r.PF}</td>
+                          <td>{r.PA}</td>
+                          <td>{r.Diff}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {ev.poolAudit.notes?.length>0 && (
+                    <ul className="muted" style={{marginTop:8}}>
+                      {ev.poolAudit.notes.map((n,i)=> <li key={i}>{n}</li>)}
+                    </ul>
+                  )}
+                </>
+              )}
+            </div>
+          ))}
 
           {/* Full games log per event */}
           {events.map((ev, idx)=> (
