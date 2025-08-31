@@ -14,12 +14,15 @@ import Papa from 'papaparse'
 const STORAGE_KEY = 'vcc-season-standings-v1'       // derived cache for offline view
 const EVENTS_KEY  = 'vcc-events-ledger-v1'          // source of truth (backup this)
 
-/** Points table from your rules */
+/** Points table (updated):
+ *  - 5-player: last place (5th) gets 50
+ *  - 7-player: last place (7th) gets 50
+ */
 const POINTS_TABLE = {
   8: { label: 'Slam',       awards: { 1: 1000, 2: 600, 3: 250, 4: 100 } },
-  7: { label: 'Signature',  awards: { 1: 700,  2: 400, 3: 100, 4: 50  } },
+  7: { label: 'Signature',  awards: { 1: 700,  2: 400, 3: 100, 7: 50  } },
   6: { label: 'Signature',  awards: { 1: 600,  2: 300, 3: 100           } },
-  5: { label: 'Challenger', awards: { 1: 300,  2: 100, 3: 50            } },
+  5: { label: 'Challenger', awards: { 1: 300,  2: 100, 5: 50            } },
   4: { label: 'Challenger', awards: { 1: 250,  2: 100                    } },
 }
 
@@ -73,10 +76,10 @@ function applyEventToSeason(season, ev) {
     })
   })
 
-  // Optional per-game stats
-  gameStats.forEach(({ team1, team2, s1, s2 })=>{
-    team1.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += s1; next[p].PA += s2 })
-    team2.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += s2; next[p].PA += s1 })
+  // Per-game stats (PF/PA + W/L). Note: each player on a team gets the team score.
+  gameStats.forEach(({ team1=[], team2=[], s1=0, s2=0 })=>{
+    team1.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += +s1; next[p].PA += +s2 })
+    team2.forEach(p=>{ next[p]=next[p]||emptyTotals(); next[p].PF += +s2; next[p].PA += +s1 })
     if (s1 > s2) { team1.forEach(p=> next[p].Wins++); team2.forEach(p=> next[p].Losses++) }
     else if (s2 > s1) { team2.forEach(p=> next[p].Wins++); team1.forEach(p=> next[p].Losses++) }
   })
@@ -176,7 +179,7 @@ function buildBracketSchedule(size){
     bracket.push(B(t('AB'), t('CD'), 'Final'))
   }
   if (size===5){
-    bracket.push(B(t('AB'), t('CD'), 'Final')) // 3rd will be E by structure
+    bracket.push(B(t('AB'), t('CD'), 'Final')) // 5th will be E by structure
   }
   if (size===6){
     bracket.push(B(t('CD'), t('EF'), 'SF'))
@@ -202,9 +205,9 @@ function computePoolStandings(poolGames){
   const table = {} // name -> {W,L,PF,PA}
   const ensure = (n)=> table[n] || (table[n] = {W:0,L:0,PF:0,PA:0})
   poolGames.forEach(g=>{
-    const { team1, team2, s1, s2 } = g
-    team1.forEach(n=>{ ensure(n); table[n].PF += s1; table[n].PA += s2 })
-    team2.forEach(n=>{ ensure(n); table[n].PF += s2; table[n].PA += s1 })
+    const { team1=[], team2=[], s1=0, s2=0 } = g
+    team1.forEach(n=>{ ensure(n); table[n].PF += +s1; table[n].PA += +s2 })
+    team2.forEach(n=>{ ensure(n); table[n].PF += +s2; table[n].PA += +s1 })
     if (s1>s2) { team1.forEach(n=> table[n].W++); team2.forEach(n=> table[n].L++) }
     else if (s2>s1) { team2.forEach(n=> table[n].W++); team1.forEach(n=> table[n].L++) }
   })
@@ -220,9 +223,9 @@ function computePoolStandings(poolGames){
   return rows.map(r=>r.Player) // ordered names, best first
 }
 
-/** Compute placements based on bracket results + bracket letters */
+/** Compute placements based on bracket results + bracket letters (after reseed) */
 function computePlacements(size, allResults, lettersBracket){
-  const placements = { 1:[], 2:[], 3:[], 4:[] }
+  const placements = { 1:[], 2:[], 3:[], 4:[], 5:[], 7:[] }
 
   // Helpers to fetch result objects by label
   const byLabel = (label)=> Object.values(allResults).find(r=> r.label===label)
@@ -235,8 +238,8 @@ function computePlacements(size, allResults, lettersBracket){
   if (size===5){
     const final = byLabel('Final')
     if (final){ placements[1]=final.winner; placements[2]=final.loser }
-    // 3rd is E (by bracket reseed letters)
-    if (lettersBracket['E']) placements[3] = [lettersBracket['E']]
+    // 5th is E (by bracket reseed letters)
+    if (lettersBracket && lettersBracket['E']) placements[5] = [lettersBracket['E']]
     return prunePlacements(placements)
   }
   if (size===6){
@@ -251,10 +254,8 @@ function computePlacements(size, allResults, lettersBracket){
     const final = byLabel('Final')
     if (final){ placements[1]=final.winner; placements[2]=final.loser }
     if (sf){ placements[3]=sf.loser }
-    // 4th = highest remaining seed by bracket letters (A best → G worst) not already placed
-    const placedSet = new Set([...(placements[1]||[]), ...(placements[2]||[]), ...(placements[3]||[])])
-    const order = ['A','B','C','D','E','F','G']
-    for (const L of order){ const n = lettersBracket[L]; if (n && !placedSet.has(n)) { placements[4] = [n]; break } }
+    // 7th = G (last seed after reseed)
+    if (lettersBracket && lettersBracket['G']) placements[7] = [lettersBracket['G']]
     return prunePlacements(placements)
   }
   if (size===8){
@@ -317,7 +318,12 @@ export default function App(){
 
   const rows = useMemo(()=>{
     const list = Object.keys(season).map(name => ({ Player: name, ...season[name] }))
-    return rankPlayers(list)
+    const ranked = rankPlayers(list)
+    return ranked.map(r => ({
+      ...r,
+      Games: r.Wins + r.Losses,
+      PointDiff: r.PF - r.PA,
+    }))
   }, [season])
 
   const addPlacementEvent = ({ size, placements, gameStats }) => {
@@ -354,8 +360,8 @@ export default function App(){
             <table>
               <thead>
                 <tr>
-                  <th>Rank</th><th>Player</th><th>Points</th><th>Wins</th><th>Losses</th>
-                  <th>Points For</th><th>Points Against</th>
+                  <th>Rank</th><th>Player</th><th>Points</th><th>Games</th><th>Wins</th><th>Losses</th>
+                  <th>Points For</th><th>Points Against</th><th>Point Diff</th>
                   <th>Slam Wins</th><th>Signature Wins</th><th>Challenger Wins</th><th>Avg Diff</th>
                 </tr>
               </thead>
@@ -365,10 +371,12 @@ export default function App(){
                     <td><strong>{r.Rank}</strong></td>
                     <td>{r.Player}</td>
                     <td>{r.Points}</td>
+                    <td>{r.Games}</td>
                     <td>{r.Wins}</td>
                     <td>{r.Losses}</td>
                     <td>{r.PF}</td>
                     <td>{r.PA}</td>
+                    <td>{r.PointDiff}</td>
                     <td>{r.SlamWins}</td>
                     <td>{r.SignatureWins}</td>
                     <td>{r.ChallengerWins}</td>
@@ -402,12 +410,6 @@ function AddEventForm({ season, onAdd }){
   const [guided, setGuided] = useState(true)
   const [method, setMethod] = useState('standings') // 'standings' | 'random'
 
-  // Manual placements state (fallback)
-  const [p1, setP1] = useState('')
-  const [p2, setP2] = useState('')
-  const [p3, setP3] = useState('')
-  const [p4, setP4] = useState('')
-
   // Guided state machine
   const [lettersPool, setLettersPool] = useState(null)     // A.. mapped for POOL
   const [lettersBracket, setLettersBracket] = useState(null)// A.. mapped for BRACKET (reseeding)
@@ -416,10 +418,17 @@ function AddEventForm({ season, onAdd }){
   const [results, setResults] = useState({})               // idx -> {team1,team2,s1,s2,stage,label}
   const [games, setGames] = useState([])                   // rolling capture for ledger (with stage/label)
 
+  // Manual placements (fallback)
+  const [p1, setP1] = useState('')
+  const [p2, setP2] = useState('')
+  const [p3, setP3] = useState('')
+  const [p4, setP4] = useState('')
+
   const names = useMemo(()=> roster.split(',').map(s=>s.trim()).filter(Boolean), [roster])
   const info = POINTS_TABLE[size]
   const needsThird  = Boolean(info.awards[3])
-  const needsFourth = Boolean(info.awards[4])
+  const needsSeventh= Boolean(info.awards[7])
+  const needsFifth  = Boolean(info.awards[5])
 
   const startGuided = () => {
     if (names.length !== size) return alert(`This event size requires exactly ${size} players in the roster`)
@@ -456,7 +465,7 @@ function AddEventForm({ season, onAdd }){
     const winner = s1>s2 ? team1 : team2
     const loser  = s1>s2 ? team2 : team1
 
-    const rec = { team1, team2, s1, s2, winner, loser, stage: currentMatch.phase, label: currentMatch.label||'' }
+    const rec = { team1, team2, s1:+s1, s2:+s2, winner, loser, stage: currentMatch.phase, label: currentMatch.label||'' }
     setResults(r => ({ ...r, [matchIdx]: rec }))
     setGames(g => [...g, rec])
 
@@ -465,10 +474,10 @@ function AddEventForm({ season, onAdd }){
     if (matchIdx < lastIndex){
       // If just finished the last POOL game, generate bracket with reseeded letters and append
       const justFinished = matchIdx
-      const allPoolsDone = schedule.every((m, idx)=> idx<=justFinished ? m.phase!=='pool' || rHas(results, idx) || idx===justFinished : true)
-      const hadBracket = schedule.some(m=> m.phase!=='pool')
+      const hasBracketAlready = schedule.some(m=> m.phase!=='pool')
+      const allPoolsEntered = !schedule.slice(0).some((m, idx)=> m.phase==='pool' && idx<=justFinished && !(idx===justFinished || Object.prototype.hasOwnProperty.call(results, idx)))
 
-      if (!hadBracket && allPoolsDone){
+      if (!hasBracketAlready && allPoolsEntered){
         // Compute pool standings from recorded pool games
         const poolGames = [...Object.values({ ...results, [matchIdx]: rec })].filter(x=> x.stage==='pool')
         const orderedNames = computePoolStandings(poolGames) // best → worst
@@ -484,9 +493,10 @@ function AddEventForm({ season, onAdd }){
 
       setMatchIdx(matchIdx + 1)
     } else {
-      // Event finished → compute placements and save
+      // Event finished → compute placements and save (ensure last game is included)
+      const finalGames = [...games, rec]
       const placements = computePlacements(size, { ...results, [matchIdx]: rec }, lettersBracket || lettersPool)
-      onAdd({ size, placements, gameStats: games.concat(rec) })
+      onAdd({ size, placements, gameStats: finalGames })
       // Reset guided state
       setMatchIdx(-1); setSchedule([]); setResults({}); setLettersPool(null); setLettersBracket(null); setGames([])
     }
@@ -607,8 +617,6 @@ function AddEventForm({ season, onAdd }){
   )
 }
 
-function rHas(obj, idx){ return Object.prototype.hasOwnProperty.call(obj, idx) }
-
 function GuidedMatchPrompt({ entry, lettersPool, lettersBracket, results, onSubmit, matchIdx, total }){
   const resolved = resolveTeamsForEntry(entry, lettersPool, lettersBracket, results)
   const label = entry.label || (entry.phase==='pool' ? `Pool` : 'Bracket')
@@ -679,15 +687,16 @@ function ManualPlacements({ size, onAdd, names }){
 
       <button className="btn primary" onClick={(e)=>{
         e.preventDefault()
-        if (!p1||!p2||!p3||!p4) return alert('Please fill 1st and 2nd pairs (two players each). For sizes that award 3rd/4th, we will prompt next screen if needed.')
+        if (!p1||!p2||!p3||!p4) return alert('Please fill 1st and 2nd pairs (two players each).')
         const placements = { 1:[p1,p2], 2:[p3,p4] }
-        if (POINTS_TABLE[size].awards[3] && !placements[3]) {
-          const candidate = names.find(n=> ![p1,p2,p3,p4].includes(n))
-          if (candidate) placements[3] = [candidate]
+        // Add last-place awards if applicable (5th/7th) based on remaining roster
+        if (POINTS_TABLE[size].awards[5]) {
+          const remaining = names.find(n=> ![p1,p2,p3,p4].includes(n))
+          if (remaining) placements[5] = [remaining]
         }
-        if (POINTS_TABLE[size].awards[4] && !placements[4]) {
-          const remaining = names.find(n=> ![p1,p2,p3,p4].includes(n) && !(placements[3]||[]).includes(n))
-          if (remaining) placements[4] = [remaining]
+        if (POINTS_TABLE[size].awards[7]) {
+          const others = names.filter(n=> ![p1,p2,p3,p4].includes(n))
+          if (others.length) placements[7] = [others[others.length-1]] // rough fallback
         }
         onAdd({ size, placements, gameStats: games })
       }}>Add Event to Standings</button>
